@@ -1,0 +1,246 @@
+#+TITLE: SDG Accelerator (including Indonesia Govt Support). Initial report
+#+AUTHOR: Dr W Turbayevsky
+
+#+LaTeX_CLASS_OPTIONS: [a4paper]
+#+LaTeX_HEADER: \usepackage[margin=1in, headheight=40pt]{geometry}
+#+LaTeX_HEADER: \let\description\compactdesc
+#+LaTeX_HEADER: \usepackage{fancyhdr}
+#+LaTeX_HEADER: \usepackage{lipsum}
+#+LaTeX_HEADER: \pagestyle{fancy}
+#+LaTeX_HEADER: \lhead{\includegraphics[width=10mm]{logo.png}}
+#+LaTeX_HEADER: \chead{}
+#+LaTeX_HEADER: \rhead{UNDP-HQ}
+#+LaTeX_HEADER: \usepackage{hyperref}
+#+LaTeX_HEADER: \hypersetup{colorlinks,urlcolor=blue}
+
+* Business task(s)
+
+There are set of reports have been created and populated inside UN. One of them are [[https://hlpf.un.org/countries][Voluntary National Reviews]] which contain information regarding countries development vector, plan and actions to be performed.
+
+To get a bird-view information regarding the whole situation regarding implementation of such plans having a database which would has a target list, actions and plans (with their connection) for all the countries would be beneficial.
+
+To complete such a task the following phases can be performed:
+
+- Scanning policies for inclusion into the Tracker database:
+  - to scan UNDP VNRs for new policies on a rolling basis
+  - use them to continue to find relevant sources to scan if/when we begin this process
+
+- Creating classification algorithms for SDGs that have been identified
+  - to classify measures into four discrete policy categories:
+  - training an algorithm on the existing policy dataset
+
+* Plan
+
+As it is mentioned at section [[sc]], the task may be divided into three stages:
+- create a *resource scanner* (optional, see section [[scan]]) to scan relevant sources, extract papers from there and convert them into a plain text
+- *Natural Language Processing (NLP)* (see section [[nlp]]) to create and train a summary extraction
+- create a *web interface* to let users upload any other VNR and to show the SDG targets related (summary) information
+- *create a Database* (optional) to be filled in with an extracted *summary* from the paper analysed along with their classification label
+
+The current progress info can be found at the section [[sc]].
+
+* Apllication
+** API
+The API is based on [[https://flask.palletsprojects.com/en/2.2.x/][Flask framework]] and provide an interface to let user upload any pdf files and return the extraction results.
+The uploading API looks like the following[fn:1]:
+
+#+begin_src python
+@app.route('/upload', methods=['GET', 'POST'])
+def upload_file():
+    if request.method == 'POST':
+        # check if the post request has the file part
+        if 'file' not in request.files:
+            flash('No file part')
+            return redirect(request.url)
+        file = request.files['file']
+        # If the user does not select a file, the browser submits an
+        # empty file without a filename.
+        if file.filename == '':
+            flash('No selected file')
+            return redirect(request.url)
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+            return redirect(url_for('extract', name=filename))
+    """
+    return '''
+    <!doctype html>
+    <title>Upload new File</title>
+    <h1>Upload new File</h1>
+    <form method=post enctype=multipart/form-data>
+      <input type=file name=file>
+      <input type=submit value=Upload>
+    </form>
+    '''
+    """
+#+end_src
+
+Then the API call the extraction function to perform text extraction, preprocessing and analysys as the following.
+
+#+begin_src python
+@app.route('/extract/<name>')
+def extract(name):
+    nlp = spacy.load("en_core_web_sm", disable=['tagger','ner','parser'])
+    nlp.max_length=2e6
+    nlp.add_pipe('sentencizer')
+    
+    fn = app.config["UPLOAD_FOLDER"]+'/'+name
+    load(fn)
+    fn = app.config["UPLOAD_FOLDER"]+'/text.txt'
+    r = clean(fn)
+    print('tokenization...')
+    doc = nlp(r)
+    return(jsonify(insight(doc)))
+#+end_src
+
+To extract text from pdf we have used [[https://github.com/jsvine/pdfplumber][pdfplumber]] library, but there is a wide range of similar application available.
+
+#+begin_src python
+def load(fn):
+    print(f'loading file...')
+    #urllib.request.urlretrieve(path, f"{cnt}.pdf")
+    txt, no = 'start', 0
+    text = ''
+    with pdfplumber.open(fn) as pdf:
+        while txt != '':
+            try:
+                page = pdf.pages[no]
+                text += page.extract_text()
+                no += 1
+                #print('.', end='')
+            except Exception as e:
+                print(e)
+                break
+    
+    print('writting...')
+    #print(text)
+    out = app.config['UPLOAD_FOLDER'] + '/text.txt'
+    with open(out, 'w') as textfile:
+        textfile.write(text)
+#+end_src
+
+A very basic text cleaning is performed using [[https://docs.python.org/3/library/re.html][Regular expression operations]] as it is shown below.
+
+#+begin_src python
+def clean(fn):
+    with open(fn, 'r') as f:
+        r = f.read()
+        r = re.sub(r'[.]{2,}','',r)
+        r = re.sub(r'[ ]+',' ',r)
+        ##r = re.sub(r'\d{2} \d\.\d+','\n',r)
+        r = re.sub(r'cid:\d+','\n',r)
+        r = re.sub(r'\n',' ',r)
+        ##r = re.sub(r'\d+.\d+\W+Goal \d+:','\nGoal: ',r)
+        return r
+#+end_src
+
+** NLP <<nlp>>
+To do all the NLP related jos the [[https://spacy.io/][SpaCy]] framework has been used.
+The task can be divided into two subtasks:
+- select a text for further analysis: the only SDG target related text should be selected, and
+- extract key phrases or summary from a selection.
+
+To perform the first task, the set of key phases for each target has been created as below. Each set has a list of words that /should be/, /may be/ and /should not be/ included into the text. Then the basic regular expression search has been used as the following.
+
+#+begin_src python
+def entities(d):
+    ent = []
+    query = [[['poverty','all'], ['no','zero','end','goal','progress'], ['conclusion']],
+        [['hunger','food','security'], ['no','zero','end','goal'], ['conclusion','annexes']],
+        [['ensure','healthy','lives'], ['promote'], ['conclusion','annexes']],
+        [['ensure','quality','education'], ['promote'], ['conclusion','annexes']],
+        [['gender','equality'], ['women'], ['conclusion','annexes']],
+        [['water','sanitation'], ['ensure'], ['conclusion','annexes']],
+        [['modern','energy'], ['ensure'], ['conclusion','annexes']],
+        [['economic','growth'], ['promote'], ['conclusion','annexes']],
+        [['resilient','infrastructure'], ['promote'], ['conclusion','annexes']],
+        [['reduce','inequality'], ['countries'], ['conclusion','annexes']],
+        [['human','settlements'], ['safe'], ['conclusion','annexes']],    
+        [['consumption','production'], ['pattern'], ['conclusion','annexes']],    
+        [['climate','change'], ['combat'], ['conclusion','annexes']],
+        [['oceans','seas','marines'], ['resources'], ['conclusion','annexes']],
+        [['ecosystems','forests'], ['protect'], ['conclusion','annexes']],
+        [['justice','societies'], ['promote'], ['conclusion','annexes']],
+        [['revitalize','partnership'], ['development'], ['conclusion','annexes']]]
+    print('finding entries...')
+    for q in tqdm(query):
+        ent.append(search(d, q[0], q[1], q[2])) 
+    print(f'done:{ent}')
+    return ent
+#+end_src
+
+The search function is described below.
+
+#+begin_src python
+def search(doc, words, maybe, stop):
+    for i, sent in enumerate(doc.sents):
+        st = [s.text.lower() for s in sent]
+        
+        if all([w in st for w in words]) and \
+        any([m in st for m in maybe]) and \
+        not any([s in st for s in stop]) and \
+        len(st)<100:
+            #print(i,'=>', sent)
+            return i
+#+end_src
+
+Finally, the /insight/ function is going through all the selected text slices to extract key phrases, convert them into json format and return to the calling application.
+
+#+begin_src python
+def insight(d):
+    global nlp
+    ins = {}
+    pos = entities(d)
+    nlp = spacy.load("en_core_web_sm")
+    for i in tqdm(range(len(pos)-1)):
+        label = f'Goal {i+1}'
+        start = pos[i] if pos[i] is not None else None
+        end = pos[i+1] if (pos[i+1] is not None and pos[i] is not None and pos[i]<pos[i+1]) else pos[i]+50 if pos[i] is not None else None
+        sl = ""
+        if start is not None and end is not None:
+            for j, s in enumerate(d.sents):
+                if j>=start and j<=end:
+                    sl += s.text
+        try:
+            if label in ins:
+                ins[label] += summ(sl) 
+            else:
+                ins[label] = summ(sl)
+        except Exception as e:
+            print(e)
+    return ins
+#+end_src
+
+* Results <<res>>
+As the result of API call, the following visual representation is shown. To test the application please call https://data.undp.org/diagnostic-simulator/acceleration-Opportunities/ZAF
+
+#+attr_latex: :width 300px
+[[./Screenshot from 2022-08-18 08-45-29.png]]
+#+attr_latex: :width 300px
+[[./Screenshot from 2022-08-18 08-47-42.png]]
+
+** Known Issues
+- to train the model all the papers should be extracted (from pdf) and converted into SpaCy object. Then the model should be trained for all the objects simultaniously. It requires lot of time and computational resources.
+  
+** Conclusion
+As it is shown in scheduler at the section [[sc]], the task is going on in accordance to the timeline. However, some modelling issues and extra NLP related tasks may require an extra time to be resolved.
+
+#+LaTeX: \appendix
+
+* Schedule <<sc>>
+- [X] create an API to upload file and to show the result
+  - [X] API to extract from pdf
+  - [X] API for preprocessing textual data
+  - [X] API to select a text which contains SDG targets    
+- [-] create a Natural Language Processing (NLP)
+  - [X] create a key phrases extractor
+  - [ ] add an abstractive or extractive summary extractor: end of Aug
+- [ ] improve the target related text selector: [Mykola] mid of Sep
+- [ ] improve a target selector and key information summary extraction to support Indonesia Govt: [Mykola & me] end of Sep
+        
+* Source code 
+** Scan the known sources <<scan>>
+#+include: "../code/nlp2.py" src python
+
+* Footnotes
+[fn:1] The API also provides with a simple uploading web form, which is commented out at the moment 
